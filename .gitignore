@@ -1,0 +1,35 @@
+# Окружение Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Переменные окружения (содержат пароли к БД)
+.env
+
+# Данные и модель (большие файлы, генерируются локально)
+ml/data.csv
+ml/model.joblib
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Временные файлы Streamlit
+.streamlit/
+
+# Тестовые выписки (персональные финансовые данные)
+*.csv
+*.xlsx
+*.xls
