@@ -17,9 +17,14 @@ from config import (
     CASH_RATIO_THRESHOLD,
     CONCENTRATION_THRESHOLD,
     FL_RATIO_THRESHOLD,
+    OKVED_KEYWORDS,
     OKVED_MISMATCH_THRESHOLD,
+    ROUND_AMOUNT_THRESHOLD,
     TAX_RATIO_THRESHOLD,
     TRANSIT_RATIO_THRESHOLD,
+    TX_FREQUENCY_CAP,
+    TX_FREQUENCY_THRESHOLD,
+    WEEKEND_RATIO_THRESHOLD,
 )
 
 
@@ -58,29 +63,7 @@ _FIO_RE = re.compile(
 )
 
 
-# ---------------------------------------------------------------------------
-# Словарь ОКВЭД (первые 2 цифры) → ожидаемые ключевые слова в назначениях
-# Источник: общероссийский классификатор видов экономической деятельности
-# ---------------------------------------------------------------------------
-
-_OKVED_KEYWORDS: dict[str, list[str]] = {
-    "41": ["строительство", "монтаж", "стройматериал", "отделка", "кровля", "фундамент"],
-    "42": ["строительство", "дорог", "трубопровод", "инфраструктур"],
-    "43": ["монтаж", "отделк", "ремонт", "электрик", "сантехник", "плитк"],
-    "45": ["автомобил", "запчаст", "техобслуживан", "автосерви"],
-    "46": ["торговля", "оптовая", "товар", "поставк", "продукт", "оборудован"],
-    "47": ["розничн", "магазин", "торговля", "продаж"],
-    "49": ["перевозк", "транспорт", "доставк", "логистик", "груз", "фрахт"],
-    "52": ["склад", "хранени", "логистик", "распределен"],
-    "53": ["почта", "курьер", "доставк"],
-    "55": ["гостиниц", "отель", "размещени", "проживани"],
-    "56": ["ресторан", "кафе", "питани", "продовольств"],
-    "62": ["программ", "разработк", "software", "лицензи", "it", "поддержк"],
-    "63": ["данны", "хостинг", "сервер", "информационн", "интернет"],
-    "68": ["аренд", "недвижимость", "имуществ", "помещени"],
-    "73": ["реклам", "маркетинг", "pr"],
-    "74": ["консультаци", "юридическ", "бухгалтер", "аудит"],
-}
+# _OKVED_KEYWORDS импортируется из config.OKVED_KEYWORDS (полный словарь с 4-значными кодами).
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +141,36 @@ FEATURE_META: list[dict[str, Any]] = [
         "scale": 100,
         "risk_description": "Более 30% расходов — переводы физлицам (признак обналичивания через людей).",
     },
+    {
+        "key": "weekend_ratio",
+        "label": "Доля операций в выходные дни",
+        "threshold": WEEKEND_RATIO_THRESHOLD,
+        "direction": "above",
+        "source": "Экспертное правило",
+        "unit": "%",
+        "scale": 100,
+        "risk_description": "Более 30% операций в субботу/воскресенье — нетипично для легального малого бизнеса.",
+    },
+    {
+        "key": "round_amount_ratio",
+        "label": "Доля круглых сумм (структурирование)",
+        "threshold": ROUND_AMOUNT_THRESHOLD,
+        "direction": "above",
+        "source": "FATF Typologies (структурирование)",
+        "unit": "%",
+        "scale": 100,
+        "risk_description": "Более 60% платежей — суммы кратные 10 000 руб. Признак намеренного дробления (structuring).",
+    },
+    {
+        "key": "tx_frequency_norm",
+        "label": "Частота транзакций",
+        "threshold": TX_FREQUENCY_THRESHOLD,
+        "direction": "above",
+        "source": "Экспертное правило",
+        "unit": "",
+        "scale": 1,
+        "risk_description": "Высокая частота (более 15 транзакций в день) при малых суммах — признак дробления платежей.",
+    },
 ]
 
 #: Строго упорядоченный список ключей — тот же порядок, что feature_vector()
@@ -168,19 +181,17 @@ FEATURE_KEYS: list[str] = [m["key"] for m in FEATURE_META]
 # Публичный API
 # ---------------------------------------------------------------------------
 
-def compute_features(df: pd.DataFrame, okved: str | None = None) -> dict:
+def compute_features(df: pd.DataFrame, okved_codes: list[str] | None = None) -> dict:
     """
-    Вычислить 7 признаков риска по выписке.
+    Вычислить 10 признаков риска по выписке.
 
     Args:
-        df:    DataFrame с колонками: date, amount, type, description,
-               counterparty, inn  (выход module1.parser.parse_statement)
-        okved: код ОКВЭД (напр. "46" или "46.1"). None → okved_mismatch = 0.0
+        df:          DataFrame с колонками: date, amount, type, description,
+                     counterparty, inn  (выход module1.parser.parse_statement)
+        okved_codes: список кодов ОКВЭД (напр. ["46", "62"]). None → okved_mismatch = 0.0
 
     Returns:
-        dict: {cash_ratio, tax_ratio, transit_ratio, okved_mismatch,
-               avg_tx_norm, counterparty_concentration, fl_ratio}
-        Все значения — float в диапазоне [0, 1].
+        dict: 10 признаков, все float в диапазоне [0, 1].
     """
     df = df.copy()
     df["description"] = df["description"].fillna("").astype(str).str.lower()
@@ -188,17 +199,20 @@ def compute_features(df: pd.DataFrame, okved: str | None = None) -> dict:
     df["inn"]          = df["inn"].fillna("").astype(str)
     df["date"]         = pd.to_datetime(df["date"], errors="coerce")
 
-    debits     = df[df["type"] == "debit"].copy()
+    debits      = df[df["type"] == "debit"].copy()
     total_debit = float(debits["amount"].sum())
 
     return {
-        "cash_ratio":                _cash_ratio(debits, total_debit),
-        "tax_ratio":                 _tax_ratio(debits, total_debit),
-        "transit_ratio":             _transit_ratio(df),
-        "okved_mismatch":            _okved_mismatch(debits, okved),
-        "avg_tx_norm":               _avg_tx_norm(df),
+        "cash_ratio":                 _cash_ratio(debits, total_debit),
+        "tax_ratio":                  _tax_ratio(debits, total_debit),
+        "transit_ratio":              _transit_ratio(df),
+        "okved_mismatch":             check_okved_compliance(df, okved_codes or [])["okved_mismatch_ratio"],
+        "avg_tx_norm":                _avg_tx_norm(df),
         "counterparty_concentration": _counterparty_concentration(debits),
-        "fl_ratio":                  _fl_ratio(debits, total_debit),
+        "fl_ratio":                   _fl_ratio(debits, total_debit),
+        "weekend_ratio":              _weekend_ratio(df),
+        "round_amount_ratio":         _round_amount_ratio(debits),
+        "tx_frequency_norm":          _tx_frequency_norm(df),
     }
 
 
@@ -237,6 +251,84 @@ def describe_features(features: dict) -> list[dict]:
 def feature_vector(features: dict) -> list[float]:
     """Упорядоченный вектор признаков для RandomForestClassifier.predict()."""
     return [float(features[k]) for k in FEATURE_KEYS]
+
+
+def check_okved_compliance(df: pd.DataFrame, okved_codes: list[str]) -> dict:
+    """
+    Проверить соответствие входящих (credit) транзакций разрешённым ОКВЭДам.
+
+    Для каждой кредитовой транзакции проверяется, содержит ли назначение платежа
+    хотя бы одно ключевое слово из _OKVED_KEYWORDS для переданных кодов.
+    Транзакции без совпадений считаются «подозрительными».
+
+    Args:
+        df:          DataFrame (выход parse_statement). Колонка description
+                     должна быть приведена к lower-case (это делает compute_features).
+        okved_codes: Список кодов ОКВЭД (напр. ["46", "62", "47.11"]).
+                     Используются первые 2 цифры кода.
+
+    Returns:
+        {
+            "okved_mismatch_ratio":    float,   # доля несоответствующих credit-транзакций
+            "suspicious_transactions": list,    # [{date, description, amount, counterparty}]
+            "total_suspicious_amount": float,   # сумма подозрительных транзакций (руб.)
+        }
+    """
+    if not okved_codes:
+        return {
+            "okved_mismatch_ratio":    0.0,
+            "suspicious_transactions": [],
+            "total_suspicious_amount": 0.0,
+        }
+
+    allowed_keywords: list[str] = []
+    for code in okved_codes:
+        code_clean = str(code).strip().replace(" ", "")
+        if code_clean in OKVED_KEYWORDS:
+            # Точное совпадение (напр. "62.01")
+            allowed_keywords.extend(OKVED_KEYWORDS[code_clean])
+        else:
+            # Prefix-match: "62" → все ключи "62.*" и "62"
+            prefix = code_clean[:2]
+            for key, kws in OKVED_KEYWORDS.items():
+                if key[:2] == prefix:
+                    allowed_keywords.extend(kws)
+    allowed_keywords = list(set(allowed_keywords))
+
+    credits = df[df["type"] == "credit"].copy()
+    if credits.empty:
+        return {
+            "okved_mismatch_ratio":    0.0,
+            "suspicious_transactions": [],
+            "total_suspicious_amount": 0.0,
+        }
+
+    if allowed_keywords:
+        match_mask = credits["description"].apply(
+            lambda desc: any(kw in desc for kw in allowed_keywords)
+        )
+    else:
+        # Коды переданы, но ни один не распознан в словаре — все подозрительны
+        match_mask = pd.Series([False] * len(credits), index=credits.index)
+
+    suspicious = credits[~match_mask]
+    mismatch_ratio = float(len(suspicious) / len(credits))
+
+    suspicious_list = [
+        {
+            "date":         row["date"].strftime("%d.%m.%Y") if pd.notna(row["date"]) else "—",
+            "description":  str(row["description"])[:120],
+            "amount":       float(row["amount"]),
+            "counterparty": str(row.get("counterparty", "")).strip(),
+        }
+        for _, row in suspicious.iterrows()
+    ]
+
+    return {
+        "okved_mismatch_ratio":    mismatch_ratio,
+        "suspicious_transactions": suspicious_list,
+        "total_suspicious_amount": float(suspicious["amount"].sum()),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +413,15 @@ def _okved_mismatch(debits: pd.DataFrame, okved: str | None) -> float:
     if not okved or debits.empty:
         return 0.0
 
-    prefix   = str(okved).strip()[:2]
-    keywords = _OKVED_KEYWORDS.get(prefix)
+    code_clean = str(okved).strip().replace(" ", "")
+    keywords: list[str] = []
+    if code_clean in OKVED_KEYWORDS:
+        keywords = OKVED_KEYWORDS[code_clean]
+    else:
+        prefix = code_clean[:2]
+        for key, kws in OKVED_KEYWORDS.items():
+            if key[:2] == prefix:
+                keywords.extend(kws)
     if not keywords:
         return 0.0
 
@@ -390,6 +489,59 @@ def _fl_ratio(debits: pd.DataFrame, total_debit: float) -> float:
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
 # ---------------------------------------------------------------------------
+
+def _weekend_ratio(df: pd.DataFrame) -> float:
+    """
+    Признак 8 — доля операций в выходные дни (суббота и воскресенье).
+
+    Высокая активность в выходные нетипична для легального малого бизнеса:
+    большинство расчётов между юрлицами проводятся в рабочие дни.
+
+    Порог риска: weekend_ratio > 0.30
+    """
+    valid = df.dropna(subset=["date"])
+    if valid.empty:
+        return 0.0
+    weekend_count = int((valid["date"].dt.dayofweek >= 5).sum())
+    return float(weekend_count / len(valid))
+
+
+def _round_amount_ratio(debits: pd.DataFrame) -> float:
+    """
+    Признак 9 — доля «круглых» сумм, кратных 10 000 руб.
+
+    Намеренное использование круглых сумм — типичный признак структурирования:
+    дробления платежей для обхода порогов обязательного контроля (115-ФЗ, ст. 6).
+
+    Порог риска: round_amount_ratio > 0.60
+    """
+    if debits.empty:
+        return 0.0
+    round_mask = debits["amount"].apply(
+        lambda x: x > 0 and round(x) % 10_000 == 0
+    )
+    return float(round_mask.sum() / len(debits))
+
+
+def _tx_frequency_norm(df: pd.DataFrame) -> float:
+    """
+    Признак 10 — нормализованная частота транзакций (транзакций в день).
+
+    Вычисляется как tx_per_day / TX_FREQUENCY_CAP (30 транзакций/день = 1.0).
+    Высокая частота при малых суммах — признак структурирования: сумма дробится
+    на множество мелких переводов, каждый из которых ниже порога контроля.
+
+    Порог риска: tx_frequency_norm > 0.50 (более 15 транзакций в день)
+    """
+    valid = df.dropna(subset=["date"])
+    if valid.empty or len(valid) < 2:
+        return 0.0
+    date_range = (valid["date"].max() - valid["date"].min()).days
+    if date_range == 0:
+        return 0.0
+    tx_per_day = len(valid) / date_range
+    return min(tx_per_day / TX_FREQUENCY_CAP, 1.0)
+
 
 def _is_individual(row: pd.Series) -> bool:
     """True если строка выписки — перевод физическому лицу."""

@@ -17,7 +17,12 @@ import streamlit as st
 from db.connection import SessionLocal
 from db.crud import get_history, save_analysis
 from module1.classifier import predict
-from module1.features import FEATURE_META, compute_features, describe_features
+from module1.features import (
+    FEATURE_META,
+    check_okved_compliance,
+    compute_features,
+    describe_features,
+)
 from module1.parser import ColumnMappingError, ParseError, parse_statement
 
 # ---------------------------------------------------------------------------
@@ -34,7 +39,7 @@ _STATUS_ICON = {True: "⚠ Риск", False: "✓ Норма"}
 # Общие UI-компоненты
 # ---------------------------------------------------------------------------
 
-def _risk_card(level: str, proba: float, triggered_count: int, filename: str) -> None:
+def _risk_card(level: str, proba: float, triggered_count: int, total_count: int, filename: str) -> None:
     """Карточка уровня риска с левой цветной полосой (стиль Т-Банка)."""
     color = _RISK_COLOR[level]
     label = _RISK_LABEL[level]
@@ -57,7 +62,7 @@ def _risk_card(level: str, proba: float, triggered_count: int, filename: str) ->
             <div style="color:#8C8C8C;font-size:13px;margin-top:6px;">
                 Уверенность модели:&nbsp;<strong style="color:#FFFFFF;">{proba*100:.1f}%</strong>
                 &nbsp;·&nbsp;
-                Сработавших признаков:&nbsp;<strong style="color:#FFFFFF;">{triggered_count} из 7</strong>
+                Сработавших признаков:&nbsp;<strong style="color:#FFFFFF;">{triggered_count} из {total_count}</strong>
                 &nbsp;·&nbsp;
                 <span style="color:#8C8C8C;">{filename}</span>
             </div>
@@ -102,11 +107,12 @@ def _section_upload() -> None:
         help="Поддерживаются форматы большинства российских банков (Сбербанк, Альфа, Тинькофф, ВТБ и др.)",
     )
 
-    okved = st.text_input(
-        "Код ОКВЭД (необязательно)",
+    okved_raw = st.text_input(
+        "Коды ОКВЭД (необязательно)",
         placeholder="Например: 46, 62, 47.1",
-        help="Если указан — система проверит соответствие назначений платежей виду деятельности.",
+        help="Через запятую. Если указаны — система проверит входящие платежи на соответствие виду деятельности.",
     ).strip()
+    okved_codes = [c.strip() for c in okved_raw.split(",") if c.strip()]
 
     if uploaded is None:
         st.markdown("""
@@ -142,15 +148,16 @@ def _section_upload() -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Транзакций",   len(df))
-    c2.metric("Дебет, руб.",  f"{debit_total:,.0f}".replace(",", " "))
-    c3.metric("Кредит, руб.", f"{credit_total:,.0f}".replace(",", " "))
+    c2.metric("Исходящие, руб.",  f"{debit_total:,.0f}".replace(",", " "))
+    c3.metric("Входящие, руб.", f"{credit_total:,.0f}".replace(",", " "))
     c4.metric("Период", f"{date_from} — {date_to}" if date_from else "—")
 
     # Превью
-    with st.expander("📋 Распознанные транзакции (первые 20 строк)", expanded=False):
-        preview = df.head(20).copy()
+    with st.expander(f"📋 Предпросмотр транзакций (первые 10 из {len(df)})", expanded=False):
+        preview = df.head(10).copy()
         preview["date"]   = preview["date"].dt.strftime("%d.%m.%Y")
         preview["amount"] = preview["amount"].apply(lambda x: f"{x:,.2f}".replace(",", " "))
+        preview["type"]   = preview["type"].map({"debit": "Исходящая", "credit": "Входящая"})
         st.dataframe(
             preview,
             column_config={
@@ -166,7 +173,7 @@ def _section_upload() -> None:
         )
 
     if st.button("🔍 Анализировать", type="primary", use_container_width=True):
-        _run_analysis(df, date_from, date_to, uploaded.name, debit_total, credit_total, okved)
+        _run_analysis(df, date_from, date_to, uploaded.name, debit_total, credit_total, okved_codes)
 
 
 # ---------------------------------------------------------------------------
@@ -180,12 +187,16 @@ def _run_analysis(
     filename: str,
     debit_total: float,
     credit_total: float,
-    okved: str,
+    okved_codes: list[str],
 ) -> None:
     with st.spinner("Вычисляю признаки риска…"):
-        features  = compute_features(df, okved or None)
-        described = describe_features(features)
-        result    = predict(features)
+        features        = compute_features(df, okved_codes or None)
+        described       = describe_features(features)
+        result          = predict(features)
+        okved_report    = check_okved_compliance(
+            df.assign(description=df["description"].fillna("").astype(str).str.lower()),
+            okved_codes,
+        )
 
     factors_data = [
         {
@@ -218,11 +229,13 @@ def _run_analysis(
         pass
 
     st.session_state["analysis_result"] = {
-        "risk_level":   result["risk_level"],
-        "risk_proba":   result["risk_proba"],
-        "importances":  result["importances"],
-        "described":    described,
-        "filename":     filename,
+        "risk_level":    result["risk_level"],
+        "risk_proba":    result["risk_proba"],
+        "importances":   result["importances"],
+        "described":     described,
+        "filename":      filename,
+        "okved_codes":   okved_codes,
+        "okved_report":  okved_report,
     }
     st.rerun()
 
@@ -232,16 +245,19 @@ def _run_analysis(
 # ---------------------------------------------------------------------------
 
 def _section_result() -> None:
-    r           = st.session_state["analysis_result"]
-    level       = r["risk_level"]
-    proba       = r["risk_proba"]
-    described   = r["described"]
-    importances = r["importances"]
+    r            = st.session_state["analysis_result"]
+    level        = r["risk_level"]
+    proba        = r["risk_proba"]
+    described    = r["described"]
+    importances  = r["importances"]
+    okved_codes  = r.get("okved_codes", [])
+    okved_report = r.get("okved_report", {})
 
     triggered_count = sum(1 for d in described if d["is_triggered"])
+    total_count     = len(described)
 
     # Риск-карточка (Т-банк стиль)
-    _risk_card(level, proba, triggered_count, r["filename"])
+    _risk_card(level, proba, triggered_count, total_count, r["filename"])
 
     col_chart, col_table = st.columns([1, 1], gap="large")
 
@@ -340,6 +356,96 @@ def _section_result() -> None:
             unsafe_allow_html=True,
         )
 
+    # OKVED compliance block — показываем только если коды были переданы
+    if okved_codes and okved_report:
+        _section_okved_compliance(okved_codes, okved_report)
+
+
+# ---------------------------------------------------------------------------
+# Секция 2б — проверка соответствия ОКВЭД
+# ---------------------------------------------------------------------------
+
+def _section_okved_compliance(okved_codes: list[str], report: dict) -> None:
+    """Блок «Соответствие ОКВЭД» — показывается когда коды переданы."""
+    mismatch   = report.get("okved_mismatch_ratio", 0.0)
+    suspicious = report.get("suspicious_transactions", [])
+    total_amt  = report.get("total_suspicious_amount", 0.0)
+
+    st.markdown(
+        "<div style='font-size:14px;font-weight:600;color:#8C8C8C;"
+        "margin:20px 0 8px 0;'>Проверка соответствия ОКВЭД</div>",
+        unsafe_allow_html=True,
+    )
+
+    codes_str = ", ".join(okved_codes)
+    pct       = mismatch * 100
+    color     = "#FF3B30" if mismatch >= 0.60 else ("#FFE000" if mismatch >= 0.30 else "#00C853")
+    icon      = "🔴" if mismatch >= 0.60 else ("🟡" if mismatch >= 0.30 else "🟢")
+
+    st.markdown(
+        f"""
+        <div style="
+            border-left:4px solid {color};background:#242424;
+            border-radius:12px;padding:16px 20px;
+            border-top:1px solid #333;border-right:1px solid #333;border-bottom:1px solid #333;
+            margin-bottom:12px;
+        ">
+            <div style="font-size:16px;font-weight:700;color:{color};">
+                {icon}&nbsp; Несоответствие ОКВЭД: {pct:.1f}%
+            </div>
+            <div style="color:#8C8C8C;font-size:13px;margin-top:6px;">
+                Проверяемые коды:&nbsp;<strong style="color:#FFFFFF;">{codes_str}</strong>
+                &nbsp;·&nbsp;
+                Подозрительных транзакций:&nbsp;<strong style="color:#FFFFFF;">{len(suspicious)}</strong>
+                &nbsp;·&nbsp;
+                Сумма:&nbsp;<strong style="color:#FFFFFF;">{total_amt:,.0f} руб.</strong>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if not suspicious:
+        st.markdown(
+            """
+            <div style="
+                border-left:4px solid #00C853;background:#242424;
+                border-radius:12px;padding:14px 18px;
+                border-top:1px solid #333;border-right:1px solid #333;border-bottom:1px solid #333;
+            ">
+                <span style="color:#00C853;font-weight:600;">✓&nbsp;</span>
+                <span style="color:#FFFFFF;">Все входящие платежи соответствуют заявленным кодам ОКВЭД.</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    with st.expander(
+        f"⚠ Подозрительные входящие транзакции ({len(suspicious)} шт.)",
+        expanded=mismatch >= 0.30,
+    ):
+        rows_df = pd.DataFrame(suspicious).rename(columns={
+            "date":         "Дата",
+            "description":  "Назначение платежа",
+            "amount":       "Сумма, руб.",
+            "counterparty": "Контрагент",
+        })
+        rows_df["Сумма, руб."] = rows_df["Сумма, руб."].apply(
+            lambda x: f"{x:,.2f}".replace(",", " ")
+        )
+        st.dataframe(
+            rows_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Дата":              st.column_config.TextColumn(width="small"),
+                "Назначение платежа": st.column_config.TextColumn(width="large"),
+                "Сумма, руб.":       st.column_config.TextColumn(width="small"),
+                "Контрагент":        st.column_config.TextColumn(width="medium"),
+            },
+        )
+
 
 # ---------------------------------------------------------------------------
 # Секция 3 — история анализов
@@ -394,8 +500,8 @@ def _section_history() -> None:
             "Файл":         rec.filename or "—",
             "Период":       (f"{rec.period_start} — {rec.period_end}" if rec.period_start else "—"),
             "Транзакций":   rec.tx_count or 0,
-            "Дебет, руб.":  f"{rec.total_debit:,.0f}".replace(",", " ") if rec.total_debit else "—",
-            "Кредит, руб.": f"{rec.total_credit:,.0f}".replace(",", " ") if rec.total_credit else "—",
+            "Исходящие, руб.":  f"{rec.total_debit:,.0f}".replace(",", " ") if rec.total_debit else "—",
+            "Входящие, руб.": f"{rec.total_credit:,.0f}".replace(",", " ") if rec.total_credit else "—",
             "Риск":         f"{_RISK_ICON.get(rec.risk_level, '?')} {_RISK_LABEL.get(rec.risk_level, rec.risk_level)}",
             "Уверенность":  f"{(rec.risk_score or 0)*100:.1f}%",
         })
@@ -413,8 +519,8 @@ def _section_history() -> None:
             "Файл":         st.column_config.TextColumn(width="medium"),
             "Период":       st.column_config.TextColumn(width="medium"),
             "Транзакций":   st.column_config.NumberColumn(width="small"),
-            "Дебет, руб.":  st.column_config.TextColumn(width="small"),
-            "Кредит, руб.": st.column_config.TextColumn(width="small"),
+            "Исходящие, руб.":  st.column_config.TextColumn(width="small"),
+            "Входящие, руб.": st.column_config.TextColumn(width="small"),
             "Риск":         st.column_config.TextColumn(width="small"),
             "Уверенность":  st.column_config.TextColumn(width="small"),
         },

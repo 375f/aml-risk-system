@@ -35,6 +35,9 @@ FEATURE_NAMES: list[str] = [
     "avg_tx_norm",
     "counterparty_concentration",
     "fl_ratio",
+    "weekend_ratio",
+    "round_amount_ratio",
+    "tx_frequency_norm",
 ]
 LABEL_NAMES = ["low", "medium", "high"]
 

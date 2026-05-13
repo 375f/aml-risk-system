@@ -36,6 +36,9 @@ FEATURE_NAMES: list[str] = [
     "avg_tx_norm",
     "counterparty_concentration",
     "fl_ratio",
+    "weekend_ratio",
+    "round_amount_ratio",
+    "tx_frequency_norm",
 ]
 
 # ---------------------------------------------------------------------------
@@ -68,8 +71,10 @@ def train(
     ])
 
     param_grid = {
-        "clf__n_estimators": [50, 100, 200],
-        "clf__max_depth":    [5, 10, None],
+        "clf__n_estimators":     [100, 200, 500],
+        "clf__max_depth":        [5, 10, None],
+        "clf__min_samples_leaf": [1, 2, 5],
+        "clf__max_features":     ["sqrt", "log2"],
     }
 
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)

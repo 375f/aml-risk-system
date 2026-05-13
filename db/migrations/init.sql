@@ -1,6 +1,3 @@
--- AML Risk System — инициализация схемы базы данных
--- Запуск: psql -U postgres -d aml_db -f db/migrations/init.sql
-
 -- Таблица 1: история анализов выписок
 CREATE TABLE IF NOT EXISTS analysis_history (
     id               SERIAL PRIMARY KEY,

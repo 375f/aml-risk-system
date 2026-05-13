@@ -28,7 +28,7 @@ import pandas as pd
 # Конфигурация
 # ---------------------------------------------------------------------------
 
-N_SAMPLES = 1000
+N_SAMPLES = 5000
 RANDOM_STATE = 42
 OUTPUT_PATH = Path(__file__).parent / "data.csv"
 
@@ -41,6 +41,9 @@ THRESHOLDS: dict[str, float] = {
     "avg_tx_norm":               1.00,   # 115-ФЗ, ст. 6 (риск если НИЖЕ)
     "counterparty_concentration": 0.80,  # 19-МР ЦБ РФ
     "fl_ratio":                  0.30,   # 19-МР ЦБ РФ
+    "weekend_ratio":             0.30,   # экспертное правило
+    "round_amount_ratio":        0.60,   # FATF Typologies (структурирование)
+    "tx_frequency_norm":         0.50,   # экспертное правило (> 15 транзакций/день)
 }
 
 # Направление риска: +1 → "выше = опаснее", -1 → "ниже = опаснее"
@@ -52,6 +55,9 @@ RISK_DIRECTION: dict[str, int] = {
     "avg_tx_norm":               -1,
     "counterparty_concentration": +1,
     "fl_ratio":                  +1,
+    "weekend_ratio":             +1,
+    "round_amount_ratio":        +1,
+    "tx_frequency_norm":         +1,
 }
 
 FEATURE_NAMES: list[str] = list(THRESHOLDS.keys())
@@ -80,6 +86,12 @@ _PARAMS: dict[str, list[tuple[float, float]]] = {
     "avg_tx_norm":               [(0.77,  0.15),         (0.37,  0.13),         (0.09,  0.06)],
     "counterparty_concentration": [(0.22, 0.12),         (0.57,  0.13),         (0.88,  0.08)],
     "fl_ratio":                  [(0.05,  0.04),         (0.18,  0.07),         (0.47,  0.15)],
+    # Признак 8: доля операций в выходные — у легального бизнеса мало, у схем — много
+    "weekend_ratio":             [(0.07,  0.04),         (0.20,  0.07),         (0.42,  0.11)],
+    # Признак 9: доля круглых сумм — у схем намеренно высокая (structuring)
+    "round_amount_ratio":        [(0.20,  0.10),         (0.48,  0.12),         (0.78,  0.10)],
+    # Признак 10: частота транзакций — схемы дробят на много мелких операций
+    "tx_frequency_norm":         [(0.10,  0.06),         (0.35,  0.12),         (0.68,  0.14)],
 }
 
 # Жёсткие границы значений [lo, hi]
@@ -91,6 +103,9 @@ _CLIP: dict[str, tuple[float, float]] = {
     "avg_tx_norm":               (0.0, 1.0),
     "counterparty_concentration": (0.0, 1.0),
     "fl_ratio":                  (0.0, 1.0),
+    "weekend_ratio":             (0.0, 1.0),
+    "round_amount_ratio":        (0.0, 1.0),
+    "tx_frequency_norm":         (0.0, 1.0),
 }
 
 # Сила корреляции через латентный фактор — доля от std каждого признака.

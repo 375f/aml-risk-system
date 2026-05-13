@@ -24,6 +24,9 @@ FEATURE_KEYS: list[str] = [
     "avg_tx_norm",
     "counterparty_concentration",
     "fl_ratio",
+    "weekend_ratio",
+    "round_amount_ratio",
+    "tx_frequency_norm",
 ]
 
 _LABELS: dict[int, str] = {0: "low", 1: "medium", 2: "high"}
