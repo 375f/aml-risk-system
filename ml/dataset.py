@@ -159,8 +159,13 @@ def generate_dataset(
     X_edge, y_edge         = _generate_edge_cases(rng, n_edge)
     X_profiles, y_profiles = _generate_sector_profiles(rng, n_profiles)
 
-    X_all = np.vstack([X_core, X_edge, X_profiles])
-    y_all = np.concatenate([y_core, y_edge, y_profiles])
+    X_raw = np.vstack([X_core, X_edge, X_profiles])
+    y_raw = np.concatenate([y_core, y_edge, y_profiles])
+
+    # Принудительно привести к целевому балансу классов (55/28/17).
+    # Без этого стратегии B и C могут сдвинуть пропорции, и модель
+    # начнёт слишком агрессивно или слишком мягко классифицировать.
+    X_all, y_all = _resample_to_shares(X_raw, y_raw, CLASS_SHARES, n_samples, rng)
 
     perm  = rng.permutation(len(y_all))
     X_all = X_all[perm]
@@ -251,9 +256,12 @@ def _generate_edge_cases(
             thr     = THRESHOLDS[feat]
             direct  = RISK_DIRECTION[feat]
 
-            # Случайно: значение "до порога", "у порога" или "после порога"
-            zone = rng.integers(0, 3)  # 0=safe, 1=at, 2=risky
-            eps  = (hi - lo) * 0.08    # ширина "у порога"
+            # Вероятности зон: 45% «норма», 30% «у порога», 25% «риск».
+            # Было [1/3, 1/3, 1/3] → при 10 признаках давало E[нарушений]=3.3,
+            # P(4+ нарушений)≈44% → слишком много меток high в тренировочных данных.
+            # Теперь E[нарушений]=2.5, P(5+ нарушений)≈8% → реалистичный баланс.
+            zone = int(rng.choice(3, p=[0.45, 0.30, 0.25]))  # 0=safe,1=at,2=risky
+            eps  = (hi - lo) * 0.08
 
             if direct == +1:
                 if zone == 0:
@@ -262,7 +270,7 @@ def _generate_edge_cases(
                     val = rng.uniform(max(lo, thr - eps), min(hi, thr + eps))
                 else:
                     val = rng.uniform(min(hi, thr + eps), hi)
-            else:  # tax_ratio, avg_tx_norm
+            else:
                 if zone == 0:
                     val = rng.uniform(min(hi, thr + eps), hi)
                 elif zone == 1:
@@ -272,11 +280,13 @@ def _generate_edge_cases(
 
             row[feat] = float(np.clip(val, lo, hi))
 
-        # Метка по количеству нарушенных порогов
+        # Метка по числу нарушенных порогов.
+        # Было: 4+ → high. При вероятности 1/3 это давало ~44% high в edge cases.
+        # Теперь: 5+ → high. При вероятности 0.25 это даёт ~8% high в edge cases.
         violations = _count_violations(row)
-        if violations <= 1:
+        if violations <= 2:
             label = 0
-        elif violations <= 3:
+        elif violations <= 4:
             label = 1
         else:
             label = 2
@@ -445,20 +455,21 @@ def _generate_sector_profiles(
             }
         },
 
-        # Camouflaged high-risk (маскированная схема): часть признаков в норме
+        # Пограничный случай: ИП с несколькими признаками выше порога, но не схема
+        # (высокий транзит + концентрация характерны для оптовика с 1-2 поставщиками)
         {
-            "label": 2,
+            "label": 1,
             "features": {
-                "cash_ratio":                (0.35, 0.10),
-                "tax_ratio":                 (0.020, 0.010),  # налоги платит — для маскировки
-                "transit_ratio":             (0.72, 0.12),
-                "okved_mismatch":            (0.55, 0.14),    # ОКВЭД частично соответствует
-                "avg_tx_norm":               (0.15, 0.08),
-                "counterparty_concentration":(0.82, 0.10),
-                "fl_ratio":                  (0.42, 0.14),
-                "weekend_ratio":             (0.15, 0.08),    # по выходным не работает — норм
-                "round_amount_ratio":        (0.70, 0.12),
-                "tx_frequency_norm":         (0.65, 0.14),
+                "cash_ratio":                (0.22, 0.09),
+                "tax_ratio":                 (0.022, 0.010),
+                "transit_ratio":             (0.58, 0.12),
+                "okved_mismatch":            (0.38, 0.14),
+                "avg_tx_norm":               (0.35, 0.13),
+                "counterparty_concentration":(0.84, 0.09),
+                "fl_ratio":                  (0.12, 0.07),
+                "weekend_ratio":             (0.10, 0.06),
+                "round_amount_ratio":        (0.45, 0.13),
+                "tx_frequency_norm":         (0.30, 0.12),
             }
         },
     ]
@@ -551,6 +562,30 @@ def _split_counts(n: int, shares: dict[int, float]) -> dict[int, int]:
     counts = {k: round(n * shares[k]) for k in keys[:-1]}
     counts[keys[-1]] = n - sum(counts.values())
     return counts
+
+
+def _resample_to_shares(
+    X: np.ndarray,
+    y: np.ndarray,
+    shares: dict[int, float],
+    n_total: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Привести датасет к целевому распределению классов.
+
+    Для классов с избытком — случайный downsample.
+    Для классов с недостатком — случайный oversample (с повторением).
+    Гарантирует итоговую сумму ровно n_total строк с пропорциями shares.
+    """
+    target = _split_counts(n_total, shares)
+    parts_X, parts_y = [], []
+    for class_id, want in target.items():
+        idx = np.where(y == class_id)[0]
+        chosen = rng.choice(idx, size=want, replace=(len(idx) < want))
+        parts_X.append(X[chosen])
+        parts_y.append(np.full(want, class_id))
+    return np.vstack(parts_X), np.concatenate(parts_y)
 
 
 # ---------------------------------------------------------------------------

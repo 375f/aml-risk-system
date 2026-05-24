@@ -5,6 +5,14 @@ app.py — точка входа AML Risk System.
     streamlit run app.py
 """
 
+import asyncio
+import sys
+
+# Устраняет "Exception in _ProactorBasePipeTransport._call_connection_lost()"
+# на Windows с Python 3.12+ — баг в ProactorEventLoop при разрыве соединения.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import streamlit as st
 
 st.set_page_config(

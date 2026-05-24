@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 
+from config import FEATURE_RECOMMENDATIONS
 from db.connection import SessionLocal
 from db.crud import get_history, save_analysis
 from module1.classifier import predict
@@ -24,6 +25,7 @@ from module1.features import (
     describe_features,
 )
 from module1.parser import ColumnMappingError, ParseError, parse_statement
+from module1.pdf_report import generate_pdf
 
 # ---------------------------------------------------------------------------
 # Палитра T-Bank
@@ -168,11 +170,11 @@ def _section_upload() -> None:
                 "counterparty": st.column_config.TextColumn("Контрагент"),
                 "inn":          st.column_config.TextColumn("ИНН"),
             },
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
-    if st.button("🔍 Анализировать", type="primary", use_container_width=True):
+    if st.button("🔍 Анализировать", type="primary", width="stretch"):
         _run_analysis(df, date_from, date_to, uploaded.name, debit_total, credit_total, okved_codes)
 
 
@@ -259,6 +261,27 @@ def _section_result() -> None:
     # Риск-карточка (Т-банк стиль)
     _risk_card(level, proba, triggered_count, total_count, r["filename"])
 
+    # --- PDF-отчёт ---
+    try:
+        pdf_bytes = generate_pdf(
+            filename     = r["filename"],
+            risk_level   = level,
+            risk_proba   = proba,
+            described    = described,
+            okved_codes  = okved_codes,
+            okved_report = okved_report,
+        )
+        safe_name = r["filename"].replace(".", "_").replace(" ", "_")
+        st.download_button(
+            label             = "📄 Скачать PDF-отчёт",
+            data              = pdf_bytes,
+            file_name         = f"aml_{safe_name}.pdf",
+            mime              = "application/pdf",
+            width="stretch",
+        )
+    except Exception as _pdf_err:
+        st.warning(f"PDF-отчёт недоступен: {_pdf_err}")
+
     col_chart, col_table = st.columns([1, 1], gap="large")
 
     # График важности признаков
@@ -301,7 +324,7 @@ def _section_result() -> None:
             })
         st.dataframe(
             pd.DataFrame(rows),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Признак":  st.column_config.TextColumn(width="medium"),
@@ -321,22 +344,52 @@ def _section_result() -> None:
             unsafe_allow_html=True,
         )
         for d in triggered:
+            rec = FEATURE_RECOMMENDATIONS.get(d["key"], {})
+
+            actions_html = "".join(
+                f'<li style="margin-bottom:5px;">{a}</li>'
+                for a in rec.get("actions", [])
+            )
+            warning_html = (
+                f'<div style="color:#FFE000;font-size:12px;margin-top:10px;'
+                f'padding-top:8px;border-top:1px solid #444;">'
+                f'⚠&nbsp; {rec["warning"]}</div>'
+                if rec.get("warning") else ""
+            )
+            rec_block = (
+                f"""
+                <div style="margin-top:12px;padding-top:10px;border-top:1px solid #3A3A3A;">
+                    <div style="color:#8C8C8C;font-size:11px;font-weight:700;
+                                letter-spacing:0.05em;margin-bottom:8px;">
+                        ЧТО ДЕЛАТЬ:
+                    </div>
+                    <ul style="color:#CCCCCC;font-size:13px;margin:0;padding-left:18px;
+                               line-height:1.6;">
+                        {actions_html}
+                    </ul>
+                    {warning_html}
+                </div>
+                """
+                if rec else ""
+            )
+
             st.markdown(
                 f"""
                 <div style="
                     border-left:3px solid #FFE000;
                     background:#242424;
                     border-radius:8px;
-                    padding:12px 16px;
-                    margin-bottom:8px;
+                    padding:14px 18px;
+                    margin-bottom:10px;
                     border-top:1px solid #333;border-right:1px solid #333;border-bottom:1px solid #333;
                 ">
                     <div style="font-weight:600;color:#FFFFFF;font-size:14px;">
                         ⚠&nbsp; {d['label']}
                     </div>
-                    <div style="color:#8C8C8C;font-size:13px;margin-top:4px;">
+                    <div style="color:#8C8C8C;font-size:13px;margin-top:5px;">
                         {d['risk_description']}
                     </div>
+                    {rec_block}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -436,7 +489,7 @@ def _section_okved_compliance(okved_codes: list[str], report: dict) -> None:
         )
         st.dataframe(
             rows_df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Дата":              st.column_config.TextColumn(width="small"),
@@ -512,7 +565,7 @@ def _section_history() -> None:
 
     st.dataframe(
         pd.DataFrame(rows),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Дата":         st.column_config.TextColumn(width="small"),

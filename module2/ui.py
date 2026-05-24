@@ -140,11 +140,11 @@ def _section_input() -> None:
         check_clicked = st.button(
             "🔍 Проверить контрагента",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=not inn_valid,
         )
     with col_clear:
-        if st.button("✖ Сбросить", use_container_width=True):
+        if st.button("✖ Сбросить", width="stretch"):
             st.session_state.pop("contractor_result", None)
             st.rerun()
 
@@ -489,7 +489,7 @@ def _section_history() -> None:
     import pandas as pd
     st.dataframe(
         pd.DataFrame(rows),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Дата проверки": st.column_config.TextColumn(width="small"),
